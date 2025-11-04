@@ -5,3 +5,4 @@ __pycache__
 deberta-functional-diversity
 wandb
 logs
+.idea
