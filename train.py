@@ -66,6 +66,7 @@ class Config:
     test_size = 0.2
     num_pairs_per_epoch = 100
     n_pairs_per_prompt = 10
+    max_length = 1024  # maximum sequence length for tokenization
 
     # Training
     lr = 1e-5
@@ -373,14 +374,14 @@ def main():
         tokenizer,
         n_pairs_per_prompt=cfg.n_pairs_per_prompt,
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
-        max_length=512
+        max_length=cfg.max_length
     )
     test_ds = FunctionalPairDataset(
         test_data,
         tokenizer,
         n_pairs_per_prompt=cfg.n_pairs_per_prompt,
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
-        max_length=512
+        max_length=cfg.max_length
     )
 
     # Create dataloaders
@@ -424,7 +425,7 @@ def main():
     )
 
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler() if cfg.fp16 else None
+    scaler = torch.amp.GradScaler("cuda") if cfg.fp16 else None
 
     # Training loop
     logger.info("\n" + "="*50)
