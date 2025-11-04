@@ -1,0 +1,44 @@
+/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/convert_slow_tokenizer.py:564: UserWarning: The sentencepiece tokenizer that you are converting to a fast tokenizer uses the byte fallback option which is not implemented in the fast tokenizers. In practice this means that the fast version of the tokenizer can produce unknown tokens whereas the sentencepiece version would have converted these unknown tokens into a sequence of byte tokens matching the original piece of text.
+  warnings.warn(
+Some weights of DebertaV2ForSequenceClassification were not initialized from the model checkpoint at microsoft/deberta-v3-large and are newly initialized: ['classifier.bias', 'classifier.weight', 'pooler.dense.bias', 'pooler.dense.weight']
+You should probably TRAIN this model on a down-stream task to be able to use it for predictions and inference.
+Downloading builder script: 4.20kB [00:00, 2.35MB/s]
+Downloading builder script: 6.79kB [00:00, 3.22MB/s]
+/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py:94: FutureWarning: `tokenizer` is deprecated and will be removed in version 5.0.0 for `Trainer.__init__`. Use `processing_class` instead.
+  return Trainer(
+Traceback (most recent call last):
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 138, in <module>
+    main()
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 129, in main
+    trainer = build_trainer(model=model, tokenizer=tokenizer, train_dataset=train_ds, test_dataset=test_ds,cfg=cfg)
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 94, in build_trainer
+    return Trainer(
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer.py", line 688, in __init__
+    self.callback_handler = CallbackHandler(
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer_callback.py", line 449, in __init__
+    self.add_callback(cb)
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer_callback.py", line 466, in add_callback
+    cb = callback() if isinstance(callback, type) else callback
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/integrations/integration_utils.py", line 683, in __init__
+    raise RuntimeError(
+RuntimeError: TensorBoardCallback requires tensorboard to be installed. Either update your PyTorch version or install tensorboardX.
+Traceback (most recent call last):
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 138, in <module>
+    main()
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 129, in main
+    trainer = build_trainer(model=model, tokenizer=tokenizer, train_dataset=train_ds, test_dataset=test_ds,cfg=cfg)
+  File "/home/lukas/Projects/ir2/joint-reinforcing/partition-classifier/train.py", line 94, in build_trainer
+    return Trainer(
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/utils/deprecation.py", line 172, in wrapped_func
+    return func(*args, **kwargs)
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer.py", line 688, in __init__
+    self.callback_handler = CallbackHandler(
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer_callback.py", line 449, in __init__
+    self.add_callback(cb)
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/trainer_callback.py", line 466, in add_callback
+    cb = callback() if isinstance(callback, type) else callback
+  File "/home/lukas/anaconda3/envs/traize-backend/lib/python3.10/site-packages/transformers/integrations/integration_utils.py", line 683, in __init__
+    raise RuntimeError(
+RuntimeError: TensorBoardCallback requires tensorboard to be installed. Either update your PyTorch version or install tensorboardX.
