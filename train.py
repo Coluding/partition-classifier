@@ -11,8 +11,10 @@ import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from typing import Callable, List, Dict, Any
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score
+from datetime import datetime
 import wandb
 from transformers import (
     AutoTokenizer,
@@ -22,37 +24,14 @@ from transformers import (
 )
 
 from dataset import FunctionalPairDataset
+from utils import setup_logger
 
+try:
+    from peft import LoraConfig, get_peft_model, TaskType
+    PEFT_AVAILABLE = True
+except ImportError:
+    PEFT_AVAILABLE = False
 
-# -------------------- Setup Logger -------------------- #
-
-def setup_logger(name, log_file=None, level=logging.INFO):
-    """Setup logger with file and console handlers."""
-    logger = logging.getLogger(name)
-    logger.setLevel(level)
-
-    # Remove existing handlers
-    logger.handlers = []
-
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-
-    # File handler
-    if log_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(level)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-
-    return logger
 
 
 # -------------------- Configuration -------------------- #
@@ -63,30 +42,37 @@ class Config:
     output_dir = "./deberta-functional-diversity"
     logging_dir = "./logs"
     seed = 42
-    test_size = 0.2
-    num_pairs_per_epoch = 100
-    n_pairs_per_prompt = 10
+    test_size = 0.1
+    num_pairs_per_epoch = 16_000
     max_length = 1024  # maximum sequence length for tokenization
+    neg_to_pos_ratio = 0.5
 
     # Training
     lr = 1e-5
-    num_epochs = 3
-    train_bs = 8
-    eval_bs = 4
+    num_epochs = 30
+    train_bs = 3
+    eval_bs = 6
     weight_decay = 0.01
     warmup_steps = 0
     max_grad_norm = 1.0
-    accumulation_steps = 1  # gradient accumulation
+    accumulation_steps = 1
 
     # Device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     fp16 = torch.cuda.is_available()
 
+    # LoRA parameters
+    use_lora = False  # enable LoRA training
+    lora_r = 8  # LoRA rank
+    lora_alpha = 16  # LoRA alpha (scaling factor)
+    lora_dropout = 0.1  # LoRA dropout
+    lora_target_modules = ["query_proj", "key_proj", "value_proj", "dense"]  # modules to apply LoRA to
+
     # Logging
-    use_wandb = False
+    use_wandb = True
     use_tensorboard = True
     project_name = "functional-diversity-classifier"
-    run_name = "deberta-v3-large"
+    run_name = f"{max_length}_{num_pairs_per_epoch}_{neg_to_pos_ratio}" + "_" + datetime.now().strftime("%Y%m%d-%H%M%S")
     log_every_n_steps = 10
     eval_every_n_epochs = 1
     save_every_n_epochs = 1
@@ -238,16 +224,21 @@ def evaluate_model(model, dataloader, device, epoch=None, writer=None, global_st
 
 # -------------------- Training -------------------- #
 
-def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, cfg,
-                writer=None, global_step=0, scaler=None):
+def train_epoch(model: nn.Module,
+                dataloader: torch.utils.data.DataLoader,
+                optimizer: torch.optim.Optimizer,
+                scheduler: torch.optim.lr_scheduler,
+                device: str,
+                epoch: int,
+                cfg: Config,
+                writer=None, global_step=0, scaler=None,
+                on_epoch_end_callbacks:  List[Callable[[nn.Module, torch.utils.data.Dataset, Dict[str, Any]], None]] = []):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
     all_preds = []
     all_labels = []
-
     progress_bar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{cfg.num_epochs}")
-
     optimizer.zero_grad()
 
     for step, batch in enumerate(progress_bar):
@@ -327,6 +318,10 @@ def train_epoch(model, dataloader, optimizer, scheduler, device, epoch, cfg,
         "train/epoch_f1": f1,
     }
 
+    for fn in on_epoch_end_callbacks:
+        fn(model, dataloader.dataset, epoch_metrics)
+
+
     return epoch_metrics, global_step
 
 
@@ -372,16 +367,16 @@ def main():
     train_ds = FunctionalPairDataset(
         train_data,
         tokenizer,
-        n_pairs_per_prompt=cfg.n_pairs_per_prompt,
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
-        max_length=cfg.max_length
+        max_length=cfg.max_length,
+        neg_to_pos_ratio=cfg.neg_to_pos_ratio,
     )
     test_ds = FunctionalPairDataset(
         test_data,
         tokenizer,
-        n_pairs_per_prompt=cfg.n_pairs_per_prompt,
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
-        max_length=cfg.max_length
+        max_length=cfg.max_length,
+        neg_to_pos_ratio=None
     )
 
     # Create dataloaders
@@ -408,6 +403,32 @@ def main():
         cfg.model_name,
         num_labels=2
     )
+
+    # Apply LoRA if enabled
+    if cfg.use_lora:
+        if not PEFT_AVAILABLE:
+            raise ImportError(
+                "LoRA training requires the 'peft' library. "
+                "Install it with: pip install peft"
+            )
+
+        logger.info("Applying LoRA adapter...")
+        logger.info(f"  LoRA rank (r): {cfg.lora_r}")
+        logger.info(f"  LoRA alpha: {cfg.lora_alpha}")
+        logger.info(f"  LoRA dropout: {cfg.lora_dropout}")
+        logger.info(f"  Target modules: {cfg.lora_target_modules}")
+
+        lora_config = LoraConfig(
+            task_type=TaskType.SEQ_CLS,
+            r=cfg.lora_r,
+            lora_alpha=cfg.lora_alpha,
+            lora_dropout=cfg.lora_dropout,
+            target_modules=cfg.lora_target_modules,
+            bias="none",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
     model.to(cfg.device)
 
     # Setup optimizer and scheduler
@@ -442,7 +463,7 @@ def main():
         # Train
         train_metrics, global_step = train_epoch(
             model, train_loader, optimizer, scheduler, cfg.device,
-            epoch, cfg, writer, global_step, scaler
+            epoch, cfg, writer, global_step, scaler, [lambda m, ds, mets: ds.on_epoch_end()]
         )
 
         logger.info(f"\nEpoch {epoch+1} Train Metrics:")

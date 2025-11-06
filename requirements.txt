@@ -5,3 +5,7 @@ tqdm>=4.65.0
 tensorboard>=2.13.0
 wandb>=0.15.0
 numpy>=1.24.0
+gradio>=4.0.0
+
+# Optional: LoRA training
+# peft>=0.5.0  # Uncomment to enable LoRA training

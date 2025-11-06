@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Main entry point for training the functional diversity classifier.
+Main entry point for training and evaluating the functional diversity classifier.
 Supports command-line argument parsing to override default configuration.
 """
 
@@ -13,8 +13,49 @@ import train
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Train a functional diversity classifier for LLM response pairs",
+        description="Train or evaluate a functional diversity classifier for LLM response pairs",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Mode selection
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="train",
+        choices=["train", "evaluate"],
+        help="Mode: 'train' to train model, 'evaluate' to evaluate partitions"
+    )
+
+    # Evaluation-specific arguments
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=None,
+        help="Path to trained model (required for evaluation mode)"
+    )
+    parser.add_argument(
+        "--eval-output",
+        type=str,
+        default="evaluation_results.json",
+        help="Path to save evaluation results"
+    )
+    parser.add_argument(
+        "--num-eval-samples",
+        type=int,
+        default=None,
+        help="Number of samples to evaluate (None = all)"
+    )
+    parser.add_argument(
+        "--clustering-method",
+        type=str,
+        default="average",
+        choices=["single", "complete", "average", "ward"],
+        help="Hierarchical clustering linkage method for evaluation"
+    )
+    parser.add_argument(
+        "--no-use-true-k",
+        action="store_true",
+        help="Don't use ground truth number of clusters in evaluation"
     )
 
     # Data parameters
@@ -42,12 +83,7 @@ def parse_args():
         default=Config.num_pairs_per_epoch,
         help="Number of pairs to sample per epoch"
     )
-    parser.add_argument(
-        "--n-pairs-per-prompt",
-        type=int,
-        default=Config.n_pairs_per_prompt,
-        help="Number of pairs to sample per prompt"
-    )
+
     parser.add_argument(
         "--max-length",
         type=int,
@@ -116,6 +152,37 @@ def parse_args():
         "--no-fp16",
         action="store_true",
         help="Disable mixed precision training (FP16)"
+    )
+
+    # LoRA parameters
+    parser.add_argument(
+        "--use-lora",
+        action="store_true",
+        help="Enable LoRA (Low-Rank Adaptation) for parameter-efficient fine-tuning"
+    )
+    parser.add_argument(
+        "--lora-r",
+        type=int,
+        default=Config.lora_r,
+        help="LoRA rank (dimension of low-rank matrices)"
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=Config.lora_alpha,
+        help="LoRA alpha (scaling factor)"
+    )
+    parser.add_argument(
+        "--lora-dropout",
+        type=float,
+        default=Config.lora_dropout,
+        help="LoRA dropout probability"
+    )
+    parser.add_argument(
+        "--lora-target-modules",
+        nargs="+",
+        default=Config.lora_target_modules,
+        help="Target modules to apply LoRA to (space-separated list)"
     )
 
     # Output parameters
@@ -210,6 +277,13 @@ def update_config_from_args(cfg, args):
     if args.no_fp16:
         cfg.fp16 = False
 
+    # LoRA parameters
+    cfg.use_lora = args.use_lora
+    cfg.lora_r = args.lora_r
+    cfg.lora_alpha = args.lora_alpha
+    cfg.lora_dropout = args.lora_dropout
+    cfg.lora_target_modules = args.lora_target_modules
+
     # Output parameters
     cfg.output_dir = args.output_dir
     cfg.logging_dir = args.logging_dir
@@ -231,13 +305,49 @@ def main():
     """Main entry point with argument parsing."""
     args = parse_args()
 
-    # Create and update config
-    cfg = Config()
-    cfg = update_config_from_args(cfg, args)
-    train.Config = type('Config', (), vars(cfg))
+    if args.mode == "train":
+        # Training mode
+        cfg = Config()
+        cfg = update_config_from_args(cfg, args)
+        train.Config = type('Config', (), vars(cfg))
+        train_main()
 
-    # Run training
-    train_main()
+    elif args.mode == "evaluate":
+        # Evaluation mode
+        if args.model_path is None:
+            print("Error: --model-path is required for evaluation mode")
+            sys.exit(1)
+
+        # Import evaluation module
+        import evaluate_partitions
+
+        # Run evaluation
+        import torch
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        model, tokenizer = evaluate_partitions.load_model_and_tokenizer(
+            args.model_path, device
+        )
+
+        data = evaluate_partitions.load_evaluation_data(
+            args.data_path, args.num_eval_samples, args.seed
+        )
+
+        results, summary = evaluate_partitions.evaluate_dataset(
+            model,
+            tokenizer,
+            data,
+            device,
+            max_length=args.max_length,
+            batch_size=args.eval_bs,
+            use_true_k=not args.no_use_true_k,
+            clustering_method=args.clustering_method
+        )
+
+        evaluate_partitions.print_summary(summary)
+        evaluate_partitions.save_results(results, summary, args.eval_output)
+
+        print(f"\nEvaluation complete! Results saved to {args.eval_output}")
 
 
 if __name__ == "__main__":
