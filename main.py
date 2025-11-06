@@ -8,6 +8,7 @@ import argparse
 import sys
 from train import Config, main as train_main
 import train
+import torch
 
 
 def parse_args():
@@ -60,10 +61,16 @@ def parse_args():
 
     # Data parameters
     parser.add_argument(
-        "--data-path",
+        "--train-path",
         type=str,
-        default=Config.data_path,
+        default=Config.train_path,
         help="Path to JSONL data file"
+    )
+    parser.add_argument(
+        "--val-path",
+        type=str,
+        default=Config.val_path,
+        help="Path to validation JSONL data file"
     )
     parser.add_argument(
         "--test-size",
@@ -83,12 +90,25 @@ def parse_args():
         default=Config.num_pairs_per_epoch,
         help="Number of pairs to sample per epoch"
     )
+    parser.add_argument(
+        "--n-pairs-per-prompt",
+        type=int,
+        default=Config.n_pairs_per_prompt,
+        help="Number of response pairs to sample per prompt"
+    )
 
     parser.add_argument(
         "--max-length",
         type=int,
         default=Config.max_length,
         help="Maximum sequence length for tokenization"
+    )
+
+    parser.add_argument(
+        "--neg-to-pos-ratio",
+        type=float,
+        default=Config.neg_to_pos_ratio,
+        help="Ratio of negative to positive pairs in training data"
     )
 
     # Model parameters
@@ -253,12 +273,14 @@ def parse_args():
 def update_config_from_args(cfg, args):
     """Update Config object with command-line arguments."""
     # Data parameters
-    cfg.data_path = args.data_path
+    cfg.train_path = args.train_path
+    cfg.val_path = args.val_path
     cfg.test_size = args.test_size
     cfg.seed = args.seed
     cfg.num_pairs_per_epoch = args.num_pairs_per_epoch
     cfg.n_pairs_per_prompt = args.n_pairs_per_prompt
     cfg.max_length = args.max_length
+    cfg.neg_to_pos_ratio = args.neg_to_pos_ratio
 
     # Model parameters
     cfg.model_name = args.model_name
@@ -273,6 +295,7 @@ def update_config_from_args(cfg, args):
     cfg.max_grad_norm = args.max_grad_norm
     cfg.accumulation_steps = args.accumulation_steps
 
+    cfg.device = "cuda" if torch.cuda.is_available() else "cpu"
     # FP16 flag (inverted logic)
     if args.no_fp16:
         cfg.fp16 = False
@@ -330,7 +353,7 @@ def main():
         )
 
         data = evaluate_partitions.load_evaluation_data(
-            args.data_path, args.num_eval_samples, args.seed
+            args.val_path, args.num_eval_samples, args.seed
         )
 
         results, summary = evaluate_partitions.evaluate_dataset(

@@ -6,6 +6,7 @@ Uses DeBERTa-v3-large fine-tuned on response pairs with custom PyTorch training 
 
 import os
 import logging
+from dataclasses import dataclass, field
 import torch
 import torch.nn as nn
 import numpy as np
@@ -35,15 +36,17 @@ except ImportError:
 
 
 # -------------------- Configuration -------------------- #
-
+@dataclass
 class Config:
     model_name = "microsoft/deberta-v3-large"
-    data_path = "data/scores.jsonl"
+    train_path = "data/new_dataset/train.jsonl"
+    val_path = "data/new_dataset/val.jsonl"
     output_dir = "./deberta-functional-diversity"
     logging_dir = "./logs"
     seed = 42
     test_size = 0.1
     num_pairs_per_epoch = 16_000
+    n_pairs_per_prompt = 10
     max_length = 1024  # maximum sequence length for tokenization
     neg_to_pos_ratio = 0.5
 
@@ -58,8 +61,8 @@ class Config:
     accumulation_steps = 1
 
     # Device
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    fp16 = torch.cuda.is_available()
+    device: str = field(init=False)
+    fp16: bool = field(init=False)
 
     # LoRA parameters
     use_lora = False  # enable LoRA training
@@ -77,6 +80,10 @@ class Config:
     eval_every_n_epochs = 1
     save_every_n_epochs = 1
     num_examples_to_log = 3  # number of prediction examples to log each epoch
+
+    def __post_init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.fp16 = (self.device == "cuda")
 
 
 # -------------------- Example Logging -------------------- #
@@ -330,6 +337,7 @@ def train_epoch(model: nn.Module,
 def main():
     cfg = Config()
     set_seed(cfg.seed)
+    ENTRIES_ARE_PAIRS = cfg.train_path != cfg.val_path
 
     # Create output directories
     os.makedirs(cfg.output_dir, exist_ok=True)
@@ -356,11 +364,15 @@ def main():
 
     # Load data
     logger.info("Loading data...")
-    train_data, test_data = FunctionalPairDataset.train_test_split_jsonl(
-        cfg.data_path,
-        test_size=cfg.test_size,
-        seed=cfg.seed
-    )
+    if ENTRIES_ARE_PAIRS:
+        train_data, test_data = FunctionalPairDataset.train_test_split_jsonl(
+            cfg.train_path,
+            test_size=cfg.test_size,
+            seed=cfg.seed
+        )
+    else:
+        train_data = FunctionalPairDataset.load_jsonl(cfg.train_path)
+        test_data = FunctionalPairDataset.load_jsonl(cfg.val_path)
 
     # Create datasets
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
@@ -370,13 +382,15 @@ def main():
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
         max_length=cfg.max_length,
         neg_to_pos_ratio=cfg.neg_to_pos_ratio,
+        entries_are_pairs=ENTRIES_ARE_PAIRS
     )
     test_ds = FunctionalPairDataset(
         test_data,
         tokenizer,
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
         max_length=cfg.max_length,
-        neg_to_pos_ratio=None
+        neg_to_pos_ratio=None,
+        entries_are_pairs=ENTRIES_ARE_PAIRS
     )
 
     # Create dataloaders

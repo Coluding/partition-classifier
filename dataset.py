@@ -17,37 +17,54 @@ class FunctionalPairDataset(Dataset):
     """
 
     def __init__(self, jsonl_path_or_data, tokenizer, max_length=512,
-                 num_pairs_per_iteration: int = 1000, neg_to_pos_ratio: Optional[float] = 0.5):
+                 num_pairs_per_iteration: int = 1000, neg_to_pos_ratio: Optional[float] = 0.5,
+                 entries_are_pairs: bool = False):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.num_pairs_per_iteration = num_pairs_per_iteration
         self.neg_to_pos_ratio = neg_to_pos_ratio
+        self.entries_are_pairs = entries_are_pairs
 
         # Load dataset (JSONL or list)
         if isinstance(jsonl_path_or_data, str):
-            self.data = self._load_jsonl(jsonl_path_or_data)
+            self.data = self.load_jsonl(jsonl_path_or_data)
         else:
             self.data = jsonl_path_or_data
 
-        self._prepare_all_partitions()
-        self._build_global_pool()
+        if self.entries_are_pairs:
+            self._prepare_pairs()
+        else:
+            self._prepare_all_partitions()
+            self._build_global_pool()
         self._resample_pairs()
 
-
-
     @staticmethod
-    def _load_jsonl(path):
+    def load_jsonl(path):
         with open(path, "r") as f:
             return [json.loads(line) for line in f if line.strip()]
 
     @staticmethod
     def train_test_split_jsonl(jsonl_path, test_size=0.2, seed=42):
-        data = FunctionalPairDataset._load_jsonl(jsonl_path)
+        data = FunctionalPairDataset.load_jsonl(jsonl_path)
         random.Random(seed).shuffle(data)
         split_idx = int(len(data) * (1 - test_size))
         return data[:split_idx], data[split_idx:]
 
     # ---------- Core methods ---------- #
+
+    def _prepare_pairs(self):
+        logger.info("Preparing pairs from provided entries...")
+        all_pairs = []
+        for item in self.data:
+            all_pairs.append({
+                "response_a": item["generation_0"],
+                "response_b": item["generation_1"],
+                "label": item["similar"],
+                "prompt": item.get("prompt", ""),
+                "id": item.get("id", "")
+            })
+        self._all_pairs = all_pairs
+        logger.info(f"Total pairs from entries: {len(all_pairs)}")
 
     def _prepare_all_partitions(self):
         """Precompute partition → indices for each prompt."""
