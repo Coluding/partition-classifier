@@ -52,7 +52,7 @@ class Config:
 
     # Training
     lr = 1e-5
-    num_epochs = 30
+    num_epochs = 8
     train_bs = 3
     eval_bs = 6
     weight_decay = 0.01

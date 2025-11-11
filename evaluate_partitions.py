@@ -1,425 +1,321 @@
 #!/usr/bin/env python3
-"""
-Evaluate partition prediction by clustering responses based on classifier predictions.
-
-This script:
-1. Loads a trained functional diversity classifier
-2. Takes samples from the dataset (with ground truth partitions)
-3. Predicts pairwise similarity between all responses for each prompt
-4. Clusters responses into predicted partitions using the similarity matrix
-5. Compares predicted partitions with ground truth using clustering metrics
-
-Clustering metrics used:
-- Adjusted Rand Index (ARI): measures similarity between clusterings
-- Normalized Mutual Information (NMI): measures mutual dependence
-- V-measure: harmonic mean of homogeneity and completeness
-- Fowlkes-Mallows Index (FMI): geometric mean of pairwise precision and recall
-"""
-
 import argparse
 import json
-import os
+from typing import List, Tuple, Dict, Any
+
 import numpy as np
 import torch
-from typing import List, Dict, Tuple
-from tqdm import tqdm
+from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import (
     adjusted_rand_score,
     normalized_mutual_info_score,
     v_measure_score,
     fowlkes_mallows_score,
+    precision_recall_fscore_support,
+    accuracy_score,
 )
-from sklearn.cluster import AgglomerativeClustering, SpectralClustering
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import squareform
 
 from utils import setup_logger
 
+logger = setup_logger("evaluate_partitions")
 
-logger = setup_logger(__name__)
-
-
-def load_model_and_tokenizer(model_path: str, device: str):
-    """Load trained classifier and tokenizer."""
+# ----------------------------- Model I/O -----------------------------
+def load_model_and_tokenizer(model_path: str, device: str = "cuda"):
     logger.info(f"Loading model from {model_path}...")
+    model = AutoModelForSequenceClassification.from_pretrained(model_path).to(device).eval()
     tokenizer = AutoTokenizer.from_pretrained(model_path)
-    model = AutoModelForSequenceClassification.from_pretrained(model_path)
-    model.to(device)
-    model.eval()
     return model, tokenizer
 
+# ----------------------------- Data I/O -----------------------------
+def _read_jsonl(path: str) -> List[Dict[str, Any]]:
+    with open(path, "r") as f:
+        return [json.loads(l) for l in f if l.strip()]
 
-def load_evaluation_data(data_path: str, num_samples: int = None, seed: int = 42):
-    """Load JSONL data for evaluation."""
+def _to_eval_item(raw: Dict[str, Any]) -> Dict[str, Any]:
+    if "generations" in raw and "partition" in raw:
+        return {
+            "id": raw.get("id", ""),
+            "prompt": raw.get("prompt", ""),
+            "generations": list(raw["generations"]),
+            "partition": list(raw["partition"]),
+            "is_pair": False,
+            "label": None,
+        }
+
+    gens = []
+    for idx, txt in sorted(
+        ((int(k.split("_")[1]), v) for k, v in raw.items() if k.startswith("generation_")),
+        key=lambda x: x[0]
+    ):
+        gens.append(txt)
+
+    part = None
+    if "similar" in raw and len(gens) == 2:
+        part = [0, 0] if int(raw["similar"]) == 1 else [0, 1]
+
+    return {
+        "id": raw.get("id", ""),
+        "prompt": raw.get("prompt", ""),
+        "generations": gens,
+        "partition": part if part is not None else [0 for _ in gens],
+        "is_pair": True,
+        "label": int(raw.get("similar", 0)) if len(gens) == 2 else None,
+    }
+
+def load_evaluation_data(data_path: str, num_samples: int | None = None, seed: int = 42):
     logger.info(f"Loading evaluation data from {data_path}...")
-    with open(data_path, "r") as f:
-        data = [json.loads(line) for line in f if line.strip()]
+    raw = _read_jsonl(data_path)
+    data = [_to_eval_item(r) for r in raw]
 
-    if num_samples is not None and num_samples < len(data):
-        np.random.seed(seed)
-        indices = np.random.choice(len(data), num_samples, replace=False)
-        data = [data[i] for i in indices]
-        logger.info(f"Sampled {num_samples} items from dataset")
+    all_pairs = all(d.get("is_pair", False) and len(d["generations"]) == 2 for d in data)
+
+    if not all_pairs:
+        data = [d for d in data if len(set(d["partition"])) >= 2]
+
+    if num_samples and num_samples < len(data):
+        rng = np.random.default_rng(seed)
+        idx = rng.choice(len(data), num_samples, replace=False)
+        data = [data[i] for i in idx]
 
     logger.info(f"Loaded {len(data)} items for evaluation")
-    return data
+    return data, all_pairs
 
-
+# ----------------------------- Inference -----------------------------
+@torch.no_grad()
 def predict_pairwise_similarity(
     model,
     tokenizer,
     responses: List[str],
     device: str,
     max_length: int = 512,
-    batch_size: int = 32
+    batch_size: int = 16,
+    prompt: str = ""
 ) -> np.ndarray:
-    """
-    Predict pairwise similarity matrix for a set of responses.
-
-    Returns:
-        similarity_matrix: NxN matrix where element [i,j] is the probability
-                          that responses i and j are in the same partition
-    """
     n = len(responses)
-    similarity_matrix = np.zeros((n, n))
+    sim = np.eye(n, dtype=np.float32)
+    sep = tokenizer.sep_token or "\n\n"
 
-    # Diagonal is always 1 (response is identical to itself)
-    np.fill_diagonal(similarity_matrix, 1.0)
-
-    # Generate all pairs
-    pairs = []
-    pair_indices = []
+    pairs, idxs = [], []
     for i in range(n):
         for j in range(i + 1, n):
-            pairs.append((responses[i], responses[j]))
-            pair_indices.append((i, j))
+            a = f"{prompt}{sep}{responses[i]}" if prompt else responses[i]
+            b = f"{prompt}{sep}{responses[j]}" if prompt else responses[j]
+            pairs.append((a, b))
+            idxs.append((i, j))
 
-    # Batch prediction
-    all_probs = []
-    with torch.no_grad():
-        for batch_start in range(0, len(pairs), batch_size):
-            batch_pairs = pairs[batch_start:batch_start + batch_size]
+    for start in range(0, len(pairs), batch_size):
+        batch = pairs[start:start + batch_size]
+        a_list = [x[0] for x in batch]
+        b_list = [x[1] for x in batch]
+        enc = tokenizer(
+            a_list, b_list,
+            truncation=True, padding=True, max_length=max_length, return_tensors="pt"
+        )
+        enc = {k: v.to(device) for k, v in enc.items()}
+        logits = model(**enc).logits
+        probs_same = torch.softmax(logits, dim=-1)[:, 1].cpu().numpy()
 
-            # Tokenize batch
-            response_a = [p[0] for p in batch_pairs]
-            response_b = [p[1] for p in batch_pairs]
+        for (i, j), p in zip(idxs[start:start + batch_size], probs_same):
+            sim[i, j] = sim[j, i] = float(p)
 
-            encodings = tokenizer(
-                response_a,
-                response_b,
-                truncation=True,
-                padding=True,
-                max_length=max_length,
-                return_tensors="pt"
-            )
+    return sim
 
-            input_ids = encodings["input_ids"].to(device)
-            attention_mask = encodings["attention_mask"].to(device)
-
-            # Predict
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits
-            probs = torch.softmax(logits, dim=-1)
-
-            # Extract probability of "same partition" (label=1)
-            same_partition_probs = probs[:, 1].cpu().numpy()
-            all_probs.extend(same_partition_probs)
-
-    # Fill similarity matrix
-    for (i, j), prob in zip(pair_indices, all_probs):
-        similarity_matrix[i, j] = prob
-        similarity_matrix[j, i] = prob  # Symmetric
-
-    return similarity_matrix
-
+# ----------------------------- Clustering -----------------------------
+def _agglo_labels_precomputed(dist: np.ndarray, n_clusters: int, linkage: str) -> np.ndarray:
+    try:
+        # scikit-learn >= 1.4
+        model = AgglomerativeClustering(n_clusters=n_clusters, metric="precomputed", linkage=linkage)
+    except TypeError:
+        # scikit-learn <= 1.3
+        model = AgglomerativeClustering(n_clusters=n_clusters, affinity="precomputed", linkage=linkage)
+    return model.fit(dist).labels_
 
 def cluster_from_similarity(
-    similarity_matrix: np.ndarray,
-    num_clusters: int = None,
-    method: str = "average"
+    sim: np.ndarray,
+    use_true_k: bool,
+    true_labels: np.ndarray,
+    linkage: str = "average"
 ) -> np.ndarray:
-    """
-    Cluster responses based on similarity matrix using hierarchical clustering.
+    dist = 1.0 - sim
 
-    Args:
-        similarity_matrix: NxN similarity matrix
-        num_clusters: Number of clusters (if None, uses automatic threshold)
-        method: Linkage method ('single', 'complete', 'average', 'ward')
-
-    Returns:
-        cluster_labels: array of cluster assignments
-    """
-    # Convert similarity to distance
-    distance_matrix = 1 - similarity_matrix
-
-    # Ensure distance matrix is valid
-    np.fill_diagonal(distance_matrix, 0)
-    distance_matrix = np.clip(distance_matrix, 0, 1)
-
-    # Convert to condensed form for scipy
-    condensed_distances = squareform(distance_matrix, checks=False)
-
-    # Hierarchical clustering
-    linkage_matrix = linkage(condensed_distances, method=method)
-
-    if num_clusters is None:
-        # Use automatic threshold (e.g., at distance 0.5)
-        cluster_labels = fcluster(linkage_matrix, t=0.5, criterion='distance')
+    if use_true_k:
+        k = int(len(set(true_labels)))
     else:
-        cluster_labels = fcluster(linkage_matrix, t=num_clusters, criterion='maxclust')
+        n = dist.shape[0]
+        candidates = list(range(2, min(n, 10) + 1)) if n >= 2 else [1]
+        best_k, best_score = candidates[0], -1e9
+        for cand in candidates:
+            pred = _agglo_labels_precomputed(dist, cand, linkage)
+            avg_intra = np.mean([dist[i][pred == pred[i]].mean() for i in range(n)])
+            score = -avg_intra
+            if score > best_score:
+                best_score, best_k = score, cand
+        k = best_k
 
-    return cluster_labels
+    return _agglo_labels_precomputed(dist, k, linkage)
 
-
+# ----------------------------- Evaluation -----------------------------
 def evaluate_single_prompt(
     model,
     tokenizer,
-    item: Dict,
+    item: Dict[str, Any],
     device: str,
     max_length: int = 512,
-    batch_size: int = 32,
+    batch_size: int = 16,
     use_true_k: bool = True,
-    clustering_method: str = "average"
-) -> Dict:
-    """
-    Evaluate partition prediction for a single prompt.
-
-    Returns:
-        metrics: dict with ARI, NMI, V-measure, FMI, and other info
-    """
+    linkage: str = "average",
+) -> Dict[str, float]:
     responses = item["generations"]
-    true_partitions = np.array(item["partition"])
+    true = np.array(item["partition"], dtype=int)
 
-    # Skip if only one response or all in same partition
-    if len(responses) <= 1:
-        return None
-
-    # Predict similarity matrix
-    similarity_matrix = predict_pairwise_similarity(
-        model, tokenizer, responses, device, max_length, batch_size
+    sim = predict_pairwise_similarity(
+        model, tokenizer, responses, device,
+        max_length=max_length, batch_size=batch_size,
+        prompt=item.get("prompt", "")
     )
+    pred = cluster_from_similarity(sim, use_true_k, true, linkage)
 
-    # Determine number of clusters
-    if use_true_k:
-        num_clusters = len(np.unique(true_partitions))
-    else:
-        num_clusters = None
-
-    # Cluster responses
-    predicted_partitions = cluster_from_similarity(
-        similarity_matrix,
-        num_clusters=num_clusters,
-        method=clustering_method
-    )
-
-    # Compute metrics
-    ari = adjusted_rand_score(true_partitions, predicted_partitions)
-    nmi = normalized_mutual_info_score(true_partitions, predicted_partitions)
-    v_measure = v_measure_score(true_partitions, predicted_partitions)
-    fmi = fowlkes_mallows_score(true_partitions, predicted_partitions)
-
-    metrics = {
-        "id": item["id"],
-        "num_responses": len(responses),
-        "num_true_partitions": len(np.unique(true_partitions)),
-        "num_pred_partitions": len(np.unique(predicted_partitions)),
-        "ari": ari,
-        "nmi": nmi,
-        "v_measure": v_measure,
-        "fmi": fmi,
-        "true_partitions": true_partitions.tolist(),
-        "pred_partitions": predicted_partitions.tolist(),
-        "similarity_matrix": similarity_matrix.tolist(),
+    return {
+        "ari": float(adjusted_rand_score(true, pred)),
+        "nmi": float(normalized_mutual_info_score(true, pred)),
+        "v": float(v_measure_score(true, pred)),
+        "fmi": float(fowlkes_mallows_score(true, pred)),
     }
-
-    return metrics
-
 
 def evaluate_dataset(
     model,
     tokenizer,
-    data: List[Dict],
+    data: List[Dict[str, Any]],
     device: str,
     max_length: int = 512,
-    batch_size: int = 32,
+    batch_size: int = 16,
     use_true_k: bool = True,
-    clustering_method: str = "average"
-) -> Tuple[List[Dict], Dict]:
-    """
-    Evaluate partition prediction on entire dataset.
-
-    Returns:
-        results: list of per-prompt results
-        summary: dict with aggregate metrics
-    """
-    results = []
-
+    clustering_method: str = "average",
+) -> Tuple[List[Dict[str, float]], Dict[str, Any]]:
     logger.info(f"Evaluating {len(data)} prompts...")
-    for item in tqdm(data, desc="Evaluating prompts"):
-        metrics = evaluate_single_prompt(
+    per = [
+        evaluate_single_prompt(
             model, tokenizer, item, device,
-            max_length, batch_size, use_true_k, clustering_method
+            max_length=max_length, batch_size=batch_size,
+            use_true_k=use_true_k, linkage=clustering_method
         )
-        if metrics is not None:
-            results.append(metrics)
+        for item in data
+    ]
 
-    # Compute summary statistics
-    ari_scores = [r["ari"] for r in results]
-    nmi_scores = [r["nmi"] for r in results]
-    v_measure_scores = [r["v_measure"] for r in results]
-    fmi_scores = [r["fmi"] for r in results]
+    def agg(key: str) -> Tuple[float, float, float]:
+        vals = np.array([x[key] for x in per], dtype=np.float64)
+        return float(vals.mean()), float(vals.std()), float(np.median(vals))
 
     summary = {
-        "num_prompts_evaluated": len(results),
-        "ari_mean": np.mean(ari_scores),
-        "ari_std": np.std(ari_scores),
-        "ari_median": np.median(ari_scores),
-        "nmi_mean": np.mean(nmi_scores),
-        "nmi_std": np.std(nmi_scores),
-        "nmi_median": np.median(nmi_scores),
-        "v_measure_mean": np.mean(v_measure_scores),
-        "v_measure_std": np.std(v_measure_scores),
-        "v_measure_median": np.median(v_measure_scores),
-        "fmi_mean": np.mean(fmi_scores),
-        "fmi_std": np.std(fmi_scores),
-        "fmi_median": np.median(fmi_scores),
+        "n_prompts": len(per),
+        "ari": agg("ari"),
+        "nmi": agg("nmi"),
+        "v": agg("v"),
+        "fmi": agg("fmi"),
     }
+    return per, summary
 
-    return results, summary
+@torch.no_grad()
+def evaluate_pairs_dataset(model, tokenizer, data, device, max_length=800, batch_size=32):
+    sep = tokenizer.sep_token or "\n\n"
+    texts_a, texts_b, labels = [], [], []
+    for it in data:
+        prompt = it.get("prompt", "")
+        a = it["generations"][0]
+        b = it["generations"][1]
+        ta = f"{prompt}{sep}{a}" if prompt else a
+        tb = f"{prompt}{sep}{b}" if prompt else b
+        texts_a.append(ta); texts_b.append(tb)
+        labels.append(int(it["label"]))
 
+    preds = []
+    for s in range(0, len(texts_a), batch_size):
+        enc = tokenizer(
+            texts_a[s:s+batch_size],
+            texts_b[s:s+batch_size],
+            truncation=True, padding=True, max_length=max_length, return_tensors="pt"
+        )
+        enc = {k: v.to(device) for k, v in enc.items()}
+        logits = model(**enc).logits
+        preds.extend(torch.argmax(logits, dim=-1).cpu().numpy().tolist())
 
-def save_results(results: List[Dict], summary: Dict, output_path: str):
-    """Save evaluation results to file."""
-    output = {
-        "summary": summary,
-        "results": results
-    }
+    acc = accuracy_score(labels, preds)
+    p, r, f1, _ = precision_recall_fscore_support(labels, preds, average="binary", zero_division=0)
+    summary = {"n_pairs": len(labels), "accuracy": float(acc), "precision": float(p), "recall": float(r), "f1": float(f1)}
+    return summary
 
-    with open(output_path, "w") as f:
-        json.dump(output, f, indent=2)
-
-    logger.info(f"Results saved to {output_path}")
-
-
-def print_summary(summary: Dict):
-    """Print summary statistics."""
-    logger.info("\n" + "="*80)
+def print_summary(summary: Dict[str, Any]) -> None:
+    logger.info("\n" + "=" * 80)
     logger.info("EVALUATION SUMMARY")
-    logger.info("="*80)
-    logger.info(f"Number of prompts evaluated: {summary['num_prompts_evaluated']}")
-    logger.info("")
-    logger.info(f"Adjusted Rand Index (ARI):")
-    logger.info(f"  Mean:   {summary['ari_mean']:.4f} ± {summary['ari_std']:.4f}")
-    logger.info(f"  Median: {summary['ari_median']:.4f}")
-    logger.info("")
-    logger.info(f"Normalized Mutual Information (NMI):")
-    logger.info(f"  Mean:   {summary['nmi_mean']:.4f} ± {summary['nmi_std']:.4f}")
-    logger.info(f"  Median: {summary['nmi_median']:.4f}")
-    logger.info("")
-    logger.info(f"V-measure:")
-    logger.info(f"  Mean:   {summary['v_measure_mean']:.4f} ± {summary['v_measure_std']:.4f}")
-    logger.info(f"  Median: {summary['v_measure_median']:.4f}")
-    logger.info("")
-    logger.info(f"Fowlkes-Mallows Index (FMI):")
-    logger.info(f"  Mean:   {summary['fmi_mean']:.4f} ± {summary['fmi_std']:.4f}")
-    logger.info(f"  Median: {summary['fmi_median']:.4f}")
-    logger.info("="*80 + "\n")
+    logger.info("=" * 80)
+    logger.info(f"Number of prompts evaluated: {summary['n_prompts']}")
+    for name in ["ari", "nmi", "v", "fmi"]:
+        mean, std, med = summary[name]
+        label = {
+            "ari": "Adjusted Rand Index (ARI)",
+            "nmi": "Normalized Mutual Information (NMI)",
+            "v": "V-measure",
+            "fmi": "Fowlkes-Mallows Index (FMI)"
+        }[name]
+        logger.info(f"\n{label}:")
+        logger.info(f"  Mean:   {mean:.4f} ± {std:.4f}")
+        logger.info(f"  Median: {med:.4f}")
 
+def save_results(results: List[Dict[str, float]], summary: Dict[str, Any], output_path: str) -> None:
+    payload = {"summary": summary, "per_prompt": results}
+    with open(output_path, "w") as f:
+        json.dump(payload, f, indent=2)
+    logger.info(f"\nResults saved to {output_path}")
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Evaluate partition prediction using trained classifier",
+# ----------------------------- CLI -----------------------------
+def _parse_args():
+    ap = argparse.ArgumentParser(
+        description="Evaluate partition clustering with a pair classifier",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
+    ap.add_argument("--model-path", type=str, required=True, help="Path to trained model")
+    ap.add_argument("--data-path", type=str, required=True, help="JSONL with prompts/generations (or pairs)")
+    ap.add_argument("--output-path", type=str, default="evaluation_results.json", help="Where to save results")
+    ap.add_argument("--max-length", type=int, default=800, help="Max token length for tokenization")
+    ap.add_argument("--batch-size", type=int, default=16, help="Batch size for inference")
+    ap.add_argument("--no-use-true-k", action="store_true", help="Infer k instead of using ground-truth cluster count")
+    ap.add_argument("--clustering-method", type=str, default="average", choices=["single", "complete", "average"])
+    ap.add_argument("--num-samples", type=int, default=None, help="Evaluate only N prompts (random sample)")
+    ap.add_argument("--seed", type=int, default=42, help="Random seed for sampling")
+    ap.add_argument("--pairwise", action="store_true", help="Evaluate as pair classification (accuracy/F1)")
+    return ap.parse_args()
 
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        required=True,
-        help="Path to trained model directory"
-    )
-    parser.add_argument(
-        "--data-path",
-        type=str,
-        required=True,
-        help="Path to JSONL data file with ground truth partitions"
-    )
-    parser.add_argument(
-        "--output-path",
-        type=str,
-        default="evaluation_results.json",
-        help="Path to save evaluation results"
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=None,
-        help="Number of samples to evaluate (None = all)"
-    )
-    parser.add_argument(
-        "--max-length",
-        type=int,
-        default=512,
-        help="Maximum sequence length for tokenization"
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=32,
-        help="Batch size for prediction"
-    )
-    parser.add_argument(
-        "--clustering-method",
-        type=str,
-        default="average",
-        choices=["single", "complete", "average", "ward"],
-        help="Hierarchical clustering linkage method"
-    )
-    parser.add_argument(
-        "--no-use-true-k",
-        action="store_true",
-        help="Don't use ground truth number of clusters (use automatic detection)"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for sampling"
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Device to run model on"
-    )
+def main():
+    args = _parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    args = parser.parse_args()
+    model, tokenizer = load_model_and_tokenizer(args.model_path, device)
+    data, all_pairs = load_evaluation_data(args.data_path, args.num_samples, args.seed)
 
-    # Load model and tokenizer
-    model, tokenizer = load_model_and_tokenizer(args.model_path, args.device)
+    if args.pairwise or all_pairs:
+        summary = evaluate_pairs_dataset(model, tokenizer, data, device, max_length=args.max_length, batch_size=args.batch_size)
+        logger.info("\nPairwise Evaluation:")
+        logger.info(f"  Pairs:     {summary['n_pairs']}")
+        logger.info(f"  Accuracy:  {summary['accuracy']:.4f}")
+        logger.info(f"  Precision: {summary['precision']:.4f}")
+        logger.info(f"  Recall:    {summary['recall']:.4f}")
+        logger.info(f"  F1:        {summary['f1']:.4f}")
+        with open(args.output_path, "w") as f:
+            json.dump({"pairwise_summary": summary}, f, indent=2)
+        print("\nEvaluation complete!")
+        return
 
-    # Load evaluation data
-    data = load_evaluation_data(args.data_path, args.num_samples, args.seed)
-
-    # Evaluate
+    # Clustering path
+    use_true_k = not args.no_use_true_k
     results, summary = evaluate_dataset(
-        model,
-        tokenizer,
-        data,
-        args.device,
-        max_length=args.max_length,
-        batch_size=args.batch_size,
-        use_true_k=not args.no_use_true_k,
-        clustering_method=args.clustering_method
+        model, tokenizer, data, device,
+        max_length=args.max_length, batch_size=args.batch_size,
+        use_true_k=use_true_k, clustering_method=args.clustering_method
     )
-
-    # Print and save results
     print_summary(summary)
     save_results(results, summary, args.output_path)
-
-    logger.info("Evaluation complete!")
-
+    print("\nEvaluation complete!")
 
 if __name__ == "__main__":
     main()

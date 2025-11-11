@@ -140,9 +140,17 @@ class FunctionalPairDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self._pairs_to_sample[idx]
+
+        # Prepend prompt as context
+        prompt = (item.get("prompt") or "").strip()
+        sep = self.tokenizer.sep_token or "\n\n"
+
+        text_a = f"{prompt}{sep}{item['response_a']}" if prompt else item["response_a"]
+        text_b = f"{prompt}{sep}{item['response_b']}" if prompt else item["response_b"]
+
         enc = self.tokenizer(
-            item["response_a"],
-            item["response_b"],
+            text_a,
+            text_b,
             truncation=True,
             padding="max_length",
             max_length=self.max_length,
