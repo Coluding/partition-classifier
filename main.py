@@ -266,6 +266,12 @@ def parse_args():
         default=Config.num_examples_to_log,
         help="Number of prediction examples to log each epoch"
     )
+    parser.add_argument(
+        "--use-prompt",
+        action="store_true",
+        help="Include prompt as context when encoding pairs"
+    )
+    
 
     return parser.parse_args()
 
@@ -274,9 +280,10 @@ def update_config_from_args(cfg, args):
     """Update Config object with command-line arguments."""
     # Data parameters
     cfg.train_path = args.train_path
-    cfg.val_path = args.val_path
+    cfgconfig.val_path = args.val_path
     cfg.test_size = args.test_size
     cfg.seed = args.seed
+    cfg.use_prompt = args.use_prompt
     cfg.num_pairs_per_epoch = args.num_pairs_per_epoch
     cfg.n_pairs_per_prompt = args.n_pairs_per_prompt
     cfg.max_length = args.max_length
