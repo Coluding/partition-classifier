@@ -18,7 +18,8 @@ class FunctionalPairDataset(Dataset):
 
     def __init__(self, jsonl_path_or_data, tokenizer, max_length=512,
                  num_pairs_per_iteration: int = 1000, neg_to_pos_ratio: Optional[float] = 0.5,
-                 entries_are_pairs: bool = False):
+                 entries_are_pairs: bool = False, use_prompt: bool = False):
+        
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.num_pairs_per_iteration = num_pairs_per_iteration
