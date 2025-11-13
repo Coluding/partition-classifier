@@ -59,7 +59,6 @@ class Config:
     warmup_steps = 0
     max_grad_norm = 1.0
     accumulation_steps = 1
-    use_prompt: bool = True
 
     # Device
     device: str = field(init=False)
@@ -383,8 +382,7 @@ def main():
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
         max_length=cfg.max_length,
         neg_to_pos_ratio=cfg.neg_to_pos_ratio,
-        entries_are_pairs=ENTRIES_ARE_PAIRS,
-        use_prompt=cfg.use_prompt
+        entries_are_pairs=ENTRIES_ARE_PAIRS
     )
     test_ds = FunctionalPairDataset(
         test_data,
@@ -392,8 +390,7 @@ def main():
         num_pairs_per_iteration=cfg.num_pairs_per_epoch,
         max_length=cfg.max_length,
         neg_to_pos_ratio=None,
-        entries_are_pairs=ENTRIES_ARE_PAIRS,
-        use_prompt=cfg.use_prompt
+        entries_are_pairs=ENTRIES_ARE_PAIRS
     )
 
     # Create dataloaders

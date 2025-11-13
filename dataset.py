@@ -18,14 +18,12 @@ class FunctionalPairDataset(Dataset):
 
     def __init__(self, jsonl_path_or_data, tokenizer, max_length=512,
                  num_pairs_per_iteration: int = 1000, neg_to_pos_ratio: Optional[float] = 0.5,
-                 entries_are_pairs: bool = False, use_prompt: bool = False):
-        
+                 entries_are_pairs: bool = False):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.num_pairs_per_iteration = num_pairs_per_iteration
         self.neg_to_pos_ratio = neg_to_pos_ratio
         self.entries_are_pairs = entries_are_pairs
-        self.use_prompt = use_prompt
 
         # Load dataset (JSONL or list)
         if isinstance(jsonl_path_or_data, str):
@@ -142,15 +140,16 @@ class FunctionalPairDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self._pairs_to_sample[idx]
+
+        # Prepend prompt as context
         prompt = (item.get("prompt") or "").strip()
         sep = self.tokenizer.sep_token or "\n\n"
 
-        if self.use_prompt and prompt:
-            text_a = f"{prompt}{sep}{item['response_a']}"
-            text_b = f"{prompt}{sep}{item['response_b']}"
-        else:
-            text_a = item["response_a"]
-            text_b = item["response_b"]
+        # text_a =  item["response_a"]
+        # text_b =  item["response_b"]
+
+        text_a = f"{prompt}{sep}{item['response_a']}" if prompt else item["response_a"]
+        text_b = f"{prompt}{sep}{item['response_b']}" if prompt else item["response_b"]
 
         enc = self.tokenizer(
             text_a,
