@@ -1,9 +1,9 @@
 #!/bin/bash
 #SBATCH --job-name=install-darling-env
-#SBATCH --partition=gpu_a100         
+#SBATCH --partition=gpu_h100       
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=8
-#SBATCH --time=12:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=logs/install_darling_env_%j.out
 #SBATCH --error=logs/install_darling_env_%j.err
 

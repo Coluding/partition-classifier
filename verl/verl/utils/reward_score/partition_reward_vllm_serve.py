@@ -11,12 +11,13 @@ import math
 # ──────────────────────────────────────────────────────────────────────────────
 # CONFIG – adjust HOSTNAME if needed
 # ──────────────────────────────────────────────────────────────────────────────
-HOSTNAME    = os.environ["VLLM_SERVER_HOSTNAME"] 
-NUM_SERVERS  = 8
-SERVER_CFGS  = [
-    {"url": f"http://{HOSTNAME}:{8000+i}", "model": f"similarity_gpu_{i}"}
-    for i in range(NUM_SERVERS)
+HOSTNAME    = os.environ["VLLM_SERVER_HOSTNAME"]
+NUM_SERVERS = 1
+SERVER_CFGS = [
+    {"url": f"http://{HOSTNAME}:8000",
+     "model": "dogtooth/similarity-classifier-f168-hf"}
 ]
+
 
 THRESHOLD = 0.5        # decision boundary: “similar” if prob > 0.45
 MAX_LEN   = 4096                   # token budget for CLS + s1 + SEP + s2 + SEP

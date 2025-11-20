@@ -1,6 +1,6 @@
 from datasets import load_dataset
 
-OUT_DIR = "/home/abaielli/darling/datasets"
+OUT_DIR = "/home/scur1900/partition-classifier/datasets"
 N_TRAIN = 10000
 N_VAL = 2000
 

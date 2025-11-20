@@ -1,10 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=sample-wildchat
-#SBATCH --partition=gpu_a100
+#SBATCH --partition=gpu_h100
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=logs/sample_wildchat_%j.out
 
 set -euo pipefail
@@ -19,7 +19,7 @@ echo "=============== WILDCHAT SAMPLING JOB ==============="
 echo "Node: $(hostname)"
 echo "Date: $(date)"
 echo "CPUs: $SLURM_CPUS_PER_TASK"
-echo "Output dir: /home/abaielli/darling/datasets"
+echo "Output dir: /home/scur1900/partition-classifier/datasets"
 echo "======================================================"
 
-python3 /home/abaielli/darling/sample_wildchat.py
+python3 /home/scur1900/partition-classifier/sample_wildchat.py

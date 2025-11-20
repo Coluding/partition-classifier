@@ -29,12 +29,12 @@ echo "=============================="
 ##############################
 # PATHS
 ##############################
-TRAIN_DS="/home/abaielli/darling/datasets/wildchat10k.parquet"
-VAL_DS="/home/abaielli/darling/datasets/wildchat_valid.parquet"
+TRAIN_DS="/home/scur1900/partition-classifier/datasets/wildchat10k.parquet"
+VAL_DS="/home/scur1900/partition-classifier/datasets/wildchat_valid.parquet"
 
-LLAMA_PATH="/home/abaielli/.cache/huggingface/hub/models--meta-llama--Llama-3.2-3B-Instruct/snapshots/0cb88a4f764b7a12671c53f0838cd831a0843b95"
-ATHENE_PATH="/home/abaielli/darling/models/athene_rm_8b"
-PARTITION_REWARD="/home/abaielli/darling/verl/verl/utils/reward_score/partition_reward_vllm_serve.py"
+LLAMA_PATH="meta-llama/Llama-3.2-3B-Instruct"
+ATHENE_PATH="Nexusflow/Athene-RM-8B"
+PARTITION_REWARD="/home/scur1900/partition-classifier/verl/verl/utils/reward_score/partition_reward_vllm_serve.py"
 
 ##############################################
 # START LOCAL VLLM CLASSIFIER SERVER ON GPU 0
@@ -151,8 +151,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.total_epochs=1 \
     trainer.logger="[console]" \
-    trainer.default_local_dir="/home/abaielli/darling/checkpoints" \
-    trainer.validation_data_dir="/home/abaielli/darling/checkpoints/rollouts" \
+    trainer.default_local_dir="/home/scur1900/partition-classifierg/checkpoints" \
+    trainer.validation_data_dir="/home/scur1900/partition-classifier/checkpoints/rollouts" \
     trainer.critic_warmup=0 \
     trainer.save_freq=2 \
     trainer.test_freq=2 \
