@@ -15,7 +15,7 @@ HOSTNAME    = os.environ["VLLM_SERVER_HOSTNAME"]
 NUM_SERVERS = 1
 SERVER_CFGS = [
     {"url": f"http://{HOSTNAME}:8000",
-     "model": "dogtooth/similarity-classifier-f168-hf"}
+     "model": "/home/scur1900/partition-classifier/models/dogtooth"}
 ]
 
 

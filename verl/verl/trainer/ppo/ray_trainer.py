@@ -686,17 +686,25 @@ class RayPPOTrainer:
         self.validation_generations_logger.log(self.config.trainer.logger, samples, self.global_steps)
 
     def _validate(self):
+        from verl.utils.tokenizer import set_pad_token_id
+        set_pad_token_id(self.tokenizer)
+
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
         metric_dict = {}
 
-        # Lists to collect samples for the table
+        # RESTORE THESE 3 LINES
         sample_inputs = []
         sample_outputs = []
         sample_scores = []
 
+        print("[DEBUG] Entering _validate", flush=True)
+
+
         for test_data in self.val_dataloader:
+            print("[DEBUG] Got validation batch", flush=True)
             test_batch = DataProto.from_single_dict(test_data)
+            print("[DEBUG] Before generation", flush=True)
 
             test_batch.non_tensor_batch["uid"] = np.array([str(uuid.uuid4()) for _ in range(len(test_batch.batch))], dtype=object)
             # repeat test batch
@@ -734,20 +742,30 @@ class RayPPOTrainer:
                 "do_sample": self.config.actor_rollout_ref.rollout.val_kwargs.do_sample,
                 "validate": True,
             }
-            print(f"test_gen_batch meta info: {test_gen_batch.meta_info}")
+            print(f"test_gen_batch meta info BEFORE pad: {test_gen_batch.meta_info}", flush=True)
 
             # pad to be divisible by dp_size
-            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(test_gen_batch, self.actor_rollout_wg.world_size)
+            test_gen_batch_padded, pad_size = pad_dataproto_to_divisor(
+                test_gen_batch, self.actor_rollout_wg.world_size
+            )
+
+            # propagate meta_info to the padded batch
+            test_gen_batch_padded.meta_info = test_gen_batch.meta_info
+            print(f"test_gen_batch_padded meta info AFTER pad: {test_gen_batch_padded.meta_info}", flush=True)
+
+            print("[DEBUG] Before sequence generation", flush=True)
             if not self.async_rollout_mode:
                 test_output_gen_batch_padded = self.actor_rollout_wg.generate_sequences(test_gen_batch_padded)
             else:
                 self.async_rollout_manager.wake_up()
                 test_output_gen_batch_padded = self.async_rollout_manager.generate_sequences(test_gen_batch_padded)
                 self.async_rollout_manager.sleep()
+            print("[DEBUG] After sequence generation", flush=True)
 
             # unpad
             test_output_gen_batch = unpad_dataproto(test_output_gen_batch_padded, pad_size=pad_size)
             print("validation generation end")
+            print("[DEBUG] After unpad", flush=True)
 
             # Store generated outputs
             output_ids = test_output_gen_batch.batch["responses"]
@@ -760,8 +778,10 @@ class RayPPOTrainer:
 
 
             # evaluate using reward_function
+            print("[DEBUG] Before reward function", flush=True)
             if self.config.reward_model.enable:
                 reward_tensor = self.rm_wg.compute_rm_score(test_batch)
+                print("[DEBUG] After reward model compute_rm_score", flush=True)
                 rm_scores = reward_tensor.batch["rm_scores"].cpu().tolist()
                 metric_dict.update({"actor/val_quality": np.mean(np.sum(rm_scores, axis=-1))})
                 
@@ -775,6 +795,7 @@ class RayPPOTrainer:
                 #    metric_dict.update({"actor/val_length_penalized_quality": np.mean(length_penalized_rm_scores)})
             else:
                 reward_tensor = self.reward_fn(test_batch, return_dict=True)
+                print("[DEBUG] After reward_fn", flush=True)
                 rm_scores = reward_tensor["reward_tensor"].cpu().tolist()
                 metric_dict.update({"actor/val_quality": np.mean(np.sum(rm_scores, axis=-1))})
                 rm_scores_sum = torch.tensor(rm_scores).sum(dim=-1)
@@ -842,6 +863,7 @@ class RayPPOTrainer:
                         metric_sec = "val-aux"
                     pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
+        print("[DEBUG] Exiting _validate", flush=True)
         return metric_dict
 
     def init_workers(self):
@@ -1049,7 +1071,12 @@ class RayPPOTrainer:
         self.config.trainer.val_before_train = False
         
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", False):
-            val_metrics = self._validate()
+            try:
+                print(f"[DEBUG] About to call _validate at step {self.global_steps}", flush=True)
+                val_metrics = self._validate()
+                print(f"[DEBUG] Returned from _validate at step {self.global_steps}", flush=True)
+            except Exception as e:
+                print(f"[DEBUG] Exception in _validate: {e}", flush=True)
             assert val_metrics, f"{val_metrics=}"
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)

@@ -19,7 +19,7 @@ class HFRollout(BaseRollout):
     def __init__(self, module: nn.Module, config):
         super().__init__()
         self.config = config
-        self.module = module
+        self.module = module  # this is the HF model (possibly FSDP-wrapped)
 
     def generate_sequences(self, prompts: DataProto) -> DataProto:
         batch_size = prompts.batch.batch_size[0]
@@ -31,14 +31,17 @@ class HFRollout(BaseRollout):
 
     @torch.no_grad()
     def _generate_minibatch(self, prompts: DataProto) -> DataProto:
-        # make sampling args can be overriden by inputs
+        # make sampling args can be overridden by inputs
         do_sample = prompts.meta_info.get("do_sample", self.config.do_sample)
         is_validate = prompts.meta_info.get("validate", False)
 
         temperature = prompts.meta_info.get("temperature", self.config.temperature)
         response_length = prompts.meta_info.get("response_length", self.config.response_length)
         top_p = prompts.meta_info.get("top_p", self.config.get("top_p", 1.0))
-        top_k = max(0, prompts.meta_info.get("top_k", self.config.get("top_k", 0)))  # to be compatible with vllm
+        top_k = max(
+            0,
+            prompts.meta_info.get("top_k", self.config.get("top_k", 0)),
+        )  # to be compatible with vllm
 
         if not do_sample:
             # do_sample==False -> greedy decoding
@@ -75,16 +78,55 @@ class HFRollout(BaseRollout):
         attention_mask = prompts.batch["attention_mask"]  # left-padded attention_mask
         position_ids = prompts.batch["position_ids"]
 
-        # used to construct attention_mask
-        eos_token_id = prompts.meta_info["eos_token_id"]
-        pad_token_id = prompts.meta_info["pad_token_id"]
+        # ------------------------------------------------------------------
+        # used to construct attention_mask / padding
+        # ------------------------------------------------------------------
+        # unwrap FSDP if needed
+        base_model = getattr(self.module, "module", self.module)
 
+        # EOS token: prefer meta_info, fall back to model config
+        eos_token_id = prompts.meta_info.get("eos_token_id", None)
+        if eos_token_id is None:
+            eos_token_id = getattr(base_model.config, "eos_token_id", None)
+
+        # If eos_token_id is a list (like [128001, 128008, 128009]), pick one
+        if isinstance(eos_token_id, (list, tuple)):
+            # use the last one (for Llama 3.2 this is usually 128009)
+            eos_token_id = eos_token_id[-1]
+
+        # PAD token: prefer meta_info, fall back to model config
+        pad_token_id = prompts.meta_info.get("pad_token_id", None)
+        if pad_token_id is None:
+            pad_token_id = getattr(base_model.config, "pad_token_id", None)
+
+        print(
+            "[HF_ROLLOUT] meta_info eos:",
+            prompts.meta_info.get("eos_token_id"),
+            "pad:",
+            prompts.meta_info.get("pad_token_id"),
+            "| using eos:",
+            eos_token_id,
+            "pad:",
+            pad_token_id,
+            flush=True,
+        )
+
+        if pad_token_id is None:
+            raise ValueError(
+                "pad_token_id is None in both prompts.meta_info and model.config. "
+                "Please ensure pad_token_id is set in the model config or meta_info."
+            )
+
+        # ------------------------------------------------------------------
+        # generation
+        # ------------------------------------------------------------------
         self.module.eval()
         param_ctx = contextlib.nullcontext()
 
         if isinstance(self.module, FSDP):
-            # recurse need to set to False according to https://github.com/pytorch/pytorch/issues/100069
+            # recurse needs to be set to False according to https://github.com/pytorch/pytorch/issues/100069
             param_ctx = FSDP.summon_full_params(self.module, writeback=False, recurse=False)
+
         with param_ctx, torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             output = self.module.generate(
                 input_ids=idx,
@@ -109,12 +151,16 @@ class HFRollout(BaseRollout):
         delta_length = sequence_length - seq.shape[1]
 
         if delta_length > 0:
-            delta_tokens = torch.ones(size=(generated_batch_size, delta_length), device=seq.device, dtype=seq.dtype)
+            delta_tokens = torch.ones(
+                size=(generated_batch_size, delta_length),
+                device=seq.device,
+                dtype=seq.dtype,
+            )
             delta_tokens = pad_token_id * delta_tokens
             seq = torch.cat((seq, delta_tokens), dim=1)
         assert seq.shape[1] == sequence_length
 
-        # make necessary reputations if num_return_sequences > 1
+        # make necessary repetitions if num_return_sequences > 1
         num_return_sequences = kwargs.get("num_return_sequences", 1)
         if num_return_sequences > 1:
             position_ids = position_ids.repeat_interleave(num_return_sequences, dim=0)
@@ -130,7 +176,11 @@ class HFRollout(BaseRollout):
         response_position_ids = position_ids[:, -1:] + delta_position_id
         position_ids = torch.cat([position_ids, response_position_ids], dim=-1)
 
-        response_attention_mask = get_response_mask(response_id=response, eos_token=eos_token_id, dtype=attention_mask.dtype)
+        response_attention_mask = get_response_mask(
+            response_id=response,
+            eos_token=eos_token_id,
+            dtype=attention_mask.dtype,
+        )
         attention_mask = torch.cat((attention_mask, response_attention_mask), dim=-1)
 
         batch = TensorDict(

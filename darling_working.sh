@@ -2,7 +2,7 @@
 #SBATCH --job-name=darling-train
 #SBATCH --partition=gpu_h100
 #SBATCH --nodes=1
-#SBATCH --gpus-per-node=3
+#SBATCH --gpus-per-node=2
 #SBATCH --cpus-per-task=8
 #SBATCH --time=00:30:00
 #SBATCH --output=logs/darling_train_%j.out
@@ -33,7 +33,7 @@ TRAIN_DS="/home/scur1900/partition-classifier/datasets/wildchat10k.parquet"
 VAL_DS="/home/scur1900/partition-classifier/datasets/wildchat_valid.parquet"
 
 LLAMA_PATH="meta-llama/Llama-3.2-3B-Instruct"
-ATHENE_PATH="Nexusflow/Athene-RM-8B"
+ATHENE_PATH="/home/scur1900/partition-classifier/models/athene-rm-8b"
 PARTITION_REWARD="/home/scur1900/partition-classifier/verl/verl/utils/reward_score/partition_reward_vllm_serve.py"
 
 ##############################################
@@ -43,7 +43,7 @@ export VLLM_SERVER_HOSTNAME="localhost"
 export VLLM_PORT=8000
 export PYTHONUNBUFFERED=1
 
-MODEL="dogtooth/similarity-classifier-f168-hf"
+MODEL="/home/scur1900/partition-classifier/models/dogtooth"
 CONTAINER=/projects/2/managed_datasets/containers/vllm/vllm_25.09.sif
 
 echo "Starting VLLM classifier on GPU0..."
@@ -111,6 +111,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$VAL_DS \
     data.prompt_key="prompt" \
     data.train_batch_size=$B \
+    data.val_batch_size=64 \
     data.max_prompt_length=256 \
     data.max_response_length=$L \
     data.filter_overlong_prompts=True \
@@ -127,8 +128,9 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.strategy=fsdp \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    +trainer.extra_generation_kwargs.pad_token_id=128009 \
 \
-    actor_rollout_ref.rollout.name=vllm \
+    actor_rollout_ref.rollout.name=hf\
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.n=$N \
     actor_rollout_ref.rollout.dtype=bfloat16 \
@@ -149,13 +151,13 @@ python3 -m verl.trainer.main_ppo \
     trainer.experiment_name="darling_partition" \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
-    trainer.total_epochs=1 \
+    trainer.total_epochs=10 \
     trainer.logger="[console]" \
     trainer.default_local_dir="/home/scur1900/partition-classifierg/checkpoints" \
     trainer.validation_data_dir="/home/scur1900/partition-classifier/checkpoints/rollouts" \
     trainer.critic_warmup=0 \
-    trainer.save_freq=2 \
-    trainer.test_freq=2 \
+    trainer.save_freq=1000 \
+    trainer.test_freq=0 \
 
 
 ##############################################
